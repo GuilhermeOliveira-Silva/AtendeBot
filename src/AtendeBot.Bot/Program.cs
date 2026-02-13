@@ -2,28 +2,56 @@
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Microsoft.EntityFrameworkCore;
+using AtendeBot.Bot.Data;
+using AtendeBot.Bot.Services;
 using DotNetEnv;
 
-// Depois vamos mover isso pra variável de ambiente (mais seguro)
+// Carrega variáveis do .env
 DotNetEnv.Env.Load();
 
 var botToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
+var connectionString = Environment.GetEnvironmentVariable("DATABASE_CONNECTION");
 
 if (string.IsNullOrEmpty(botToken))
 {
-    Console.WriteLine("❌ Token não encontrado! Crie um arquivo .env com TELEGRAM_BOT_TOKEN=seu_token");
-    return;
+  Console.WriteLine("❌ Token não encontrado! Crie um arquivo .env com TELEGRAM_BOT_TOKEN=seu_token");
+  return;
 }
+
+if (string.IsNullOrEmpty(connectionString))
+{
+  Console.WriteLine("❌ Connection string não encontrada! Adicione DATABASE_CONNECTION no .env");
+  return;
+}
+
+// Configura a conexão com o banco
+var dbOptions = new DbContextOptionsBuilder<AppDbContext>()
+    .UseMySql(connectionString, ServerVersion.AutoDetect(connectionString))
+    .Options;
+
+// Testa a conexão com o banco
+try
+{
+  using var testDb = new AppDbContext(dbOptions);
+  testDb.Database.CanConnect();
+  Console.WriteLine("✅ Conectado ao banco de dados!");
+}
+catch (Exception ex)
+{
+  Console.WriteLine($"❌ Erro ao conectar no banco: {ex.Message}");
+  return;
+}
+
 var botClient = new TelegramBotClient(botToken);
 
 Console.WriteLine("🤖 AtendeBot está rodando! Pressione Ctrl+C para parar.");
 
-// Configuração do bot
 using var cts = new CancellationTokenSource();
 
 var receiverOptions = new ReceiverOptions
 {
-    AllowedUpdates = Array.Empty<UpdateType>()
+  AllowedUpdates = Array.Empty<UpdateType>()
 };
 
 botClient.StartReceiving(
@@ -33,82 +61,98 @@ botClient.StartReceiving(
     cancellationToken: cts.Token
 );
 
-// Mostra o nome do bot no terminal
 var me = await botClient.GetMe();
 Console.WriteLine($"✅ Bot conectado como: @{me.Username}");
 
-// Mantém o programa rodando
 Console.ReadLine();
 cts.Cancel();
 
 // === FUNÇÃO QUE RECEBE AS MENSAGENS ===
 async Task HandleUpdateAsync(ITelegramBotClient client, Update update, CancellationToken token)
 {
-    // Só processa mensagens de texto
-    if (update.Message is not { } message)
-        return;
-    if (message.Text is not { } texto)
-        return;
+  if (update.Message is not { } message)
+    return;
+  if (message.Text is not { } texto)
+    return;
 
-    var nomeCliente = message.From?.FirstName ?? "Cliente";
-    var chatId = message.Chat.Id;
+  var nomeCliente = message.From?.FirstName ?? "Cliente";
+  var chatId = message.Chat.Id;
 
-    Console.WriteLine($"📩 Mensagem de {nomeCliente}: {texto}");
+  Console.WriteLine($"📩 Mensagem de {nomeCliente}: {texto}");
 
-    // Responde de acordo com o que o cliente mandou
-    if (texto == "/start")
+  // Cria conexão com o banco pra cada mensagem
+  using var db = new AppDbContext(dbOptions);
+  var pedidoService = new PedidoService(db);
+
+  string resposta;
+
+  // Se o cliente tá no meio de um pedido, processa por lá
+  if (pedidoService.ClienteEstaPedindo(chatId) && !texto.StartsWith("/"))
+  {
+    resposta = pedidoService.ProcessarMensagem(chatId, texto);
+  }
+  else
+  {
+    // Comandos normais
+    switch (texto)
     {
-        await client.SendMessage(
-            chatId: chatId,
-            text: $"Olá, {nomeCliente}! 👋\n\n"
-                + "Bem-vindo ao AtendeBot! 🤖\n\n"
-                + "Comandos disponíveis:\n"
-                + "/cardapio - Ver nosso cardápio\n"
-                + "/pedir - Fazer um pedido\n"
-                + "/status - Ver status do seu pedido",
-            cancellationToken: token
-        );
+      case "/start":
+        resposta = $"Olá, {nomeCliente}! 👋\n\n"
+            + "Bem-vindo ao AtendeBot! 🤖\n\n"
+            + "Comandos disponíveis:\n"
+            + "/cardapio - Ver nosso cardápio\n"
+            + "/pedir - Fazer um pedido\n"
+            + "/status - Ver status do seu pedido";
+        break;
+
+      case "/cardapio":
+        var itens = db.CardapioItens
+            .Where(i => i.ComercioId == 1 && i.Disponivel)
+            .ToList();
+
+        if (itens.Count == 0)
+        {
+          resposta = "😕 Nenhum item disponível no momento.";
+          break;
+        }
+
+        resposta = "🍽️ *CARDÁPIO*\n\n";
+        for (int i = 0; i < itens.Count; i++)
+        {
+          var item = itens[i];
+          resposta += $"{i + 1}️⃣ {item.Nome} - R$ {item.Preco:F2}\n";
+          if (!string.IsNullOrEmpty(item.Descricao))
+            resposta += $"   _{item.Descricao}_\n";
+          resposta += "\n";
+        }
+        resposta += "Para pedir, envie /pedir";
+        break;
+
+      case "/pedir":
+        resposta = pedidoService.IniciarPedido(chatId);
+        break;
+
+      case "/status":
+        resposta = "🔜 Em breve você poderá ver o status aqui!";
+        break;
+
+      default:
+        resposta = $"Recebi sua mensagem: \"{texto}\"\n\n"
+            + "Use /start para ver os comandos disponíveis. 😉";
+        break;
     }
-    else if (texto == "/cardapio")
-    {
-        await client.SendMessage(
-            chatId: chatId,
-            text: "🍽️ *CARDÁPIO*\n\n"
-                + "1️⃣ X-Burger - R$ 18,00\n"
-                + "2️⃣ X-Salada - R$ 20,00\n"
-                + "3️⃣ X-Bacon - R$ 22,00\n"
-                + "4️⃣ Coca-Cola Lata - R$ 6,00\n"
-                + "5️⃣ Suco Natural - R$ 8,00\n\n"
-                + "Para pedir, envie /pedir",
-            parseMode: ParseMode.Markdown,
-            cancellationToken: token
-        );
-    }
-    else if (texto == "/pedir")
-    {
-        await client.SendMessage(
-            chatId: chatId,
-            text: "📝 Ótimo! Vamos montar seu pedido.\n\n"
-                + "Por enquanto, me diga o que deseja "
-                + "e em breve teremos o sistema completo! 😊\n\n"
-                + "Exemplo: 2x X-Burger, 1x Coca-Cola",
-            cancellationToken: token
-        );
-    }
-    else
-    {
-        await client.SendMessage(
-            chatId: chatId,
-            text: $"Recebi sua mensagem: \"{texto}\"\n\n"
-                + "Use /start para ver os comandos disponíveis. 😉",
-            cancellationToken: token
-        );
-    }
+  }
+
+  await client.SendMessage(
+      chatId: chatId,
+      text: resposta,
+      parseMode: ParseMode.Markdown,
+      cancellationToken: token
+  );
 }
 
-// === FUNÇÃO QUE TRATA ERROS ===
 Task HandleErrorAsync(ITelegramBotClient client, Exception exception, CancellationToken token)
 {
-    Console.WriteLine($"❌ Erro: {exception.Message}");
-    return Task.CompletedTask;
+  Console.WriteLine($"❌ Erro: {exception.Message}");
+  return Task.CompletedTask;
 }
