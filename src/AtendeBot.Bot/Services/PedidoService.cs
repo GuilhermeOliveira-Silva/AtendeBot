@@ -8,6 +8,7 @@ public class PedidoService
     private static readonly Dictionary<long, PedidoState> _estados = new();
 
     private readonly AppDbContext _db;
+    public Pedido? UltimoPedidoFinalizado { get; private set; }
 
     public PedidoService(AppDbContext db)
     {
@@ -199,55 +200,58 @@ public class PedidoService
     }
 
     private string FinalizarPedido(long chatId, PedidoState state)
+{
+    decimal total = state.Itens.Sum(i => i.Item.Preco * i.Quantidade);
+
+    var pedido = new Pedido
     {
-        decimal total = state.Itens.Sum(i => i.Item.Preco * i.Quantidade);
+        ComercioId = 1,
+        ClienteTelegramId = chatId.ToString(),
+        TipoEntrega = state.TipoEntrega,
+        EnderecoEntrega = state.Endereco,
+        Observacao = state.Observacao,
+        Status = "novo",
+        Total = total,
+        CriadoEm = DateTime.Now
+    };
 
-        var pedido = new Pedido
+    _db.Pedidos.Add(pedido);
+    _db.SaveChanges();
+
+    foreach (var item in state.Itens)
+    {
+        var pedidoItem = new PedidoItem
         {
-            ComercioId = 1,
-            ClienteTelegramId = chatId.ToString(),
-            TipoEntrega = state.TipoEntrega,
-            EnderecoEntrega = state.Endereco,
-            Observacao = state.Observacao,
-            Status = "novo",
-            Total = total,
-            CriadoEm = DateTime.Now
+            PedidoId = pedido.Id,
+            CardapioItemId = item.Item.Id,
+            Quantidade = item.Quantidade,
+            PrecoUnitario = item.Item.Preco
         };
-
-        _db.Pedidos.Add(pedido);
-        _db.SaveChanges();
-
-        foreach (var item in state.Itens)
-        {
-            var pedidoItem = new PedidoItem
-            {
-                PedidoId = pedido.Id,
-                CardapioItemId = item.Item.Id,
-                Quantidade = item.Quantidade,
-                PrecoUnitario = item.Item.Preco
-            };
-            _db.PedidoItens.Add(pedidoItem);
-        }
-        _db.SaveChanges();
-
-        _estados.Remove(chatId);
-
-        var resumo = "✅ *PEDIDO CONFIRMADO!*\n\n";
-        resumo += $"📋 Pedido #{pedido.Id}\n\n";
-        foreach (var item in state.Itens)
-        {
-            resumo += $"  {item.Quantidade}x {item.Item.Nome} - R$ {(item.Item.Preco * item.Quantidade):F2}\n";
-        }
-        resumo += $"\n💰 *Total: R$ {total:F2}*\n";
-        resumo += $"🚗 {(state.TipoEntrega == "entrega" ? $"Entrega em: {state.Endereco}" : "Retirada no local")}\n";
-
-        if (!string.IsNullOrEmpty(state.Observacao))
-        {
-            resumo += $"📝 Obs: {state.Observacao}\n";
-        }
-
-        resumo += "\nObrigado pelo pedido! 😊";
-
-        return resumo;
+        _db.PedidoItens.Add(pedidoItem);
     }
+    _db.SaveChanges();
+
+    // Guarda o ID do pedido pra notificar o dono
+    UltimoPedidoFinalizado = pedido;
+
+    _estados.Remove(chatId);
+
+    var resumo = "✅ *PEDIDO CONFIRMADO!*\n\n";
+    resumo += $"📋 Pedido #{pedido.Id}\n\n";
+    foreach (var item in state.Itens)
+    {
+        resumo += $"  {item.Quantidade}x {item.Item.Nome} - R$ {(item.Item.Preco * item.Quantidade):F2}\n";
+    }
+    resumo += $"\n💰 *Total: R$ {total:F2}*\n";
+    resumo += $"🚗 {(state.TipoEntrega == "entrega" ? $"Entrega em: {state.Endereco}" : "Retirada no local")}\n";
+
+    if (!string.IsNullOrEmpty(state.Observacao))
+    {
+        resumo += $"📝 Obs: {state.Observacao}\n";
+    }
+
+    resumo += "\nObrigado pelo pedido! 😊";
+
+    return resumo;
+}
 }
